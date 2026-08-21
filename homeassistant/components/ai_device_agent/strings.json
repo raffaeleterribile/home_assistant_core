@@ -1,0 +1,16 @@
+{
+	"config": {
+		"step": {
+			"user": {
+				"title": "Set up AI Device Agent",
+				"description": "Create the local AI device agent for light and switch control.",
+				"data": {
+					"name": "Name"
+				}
+			}
+		},
+		"abort": {
+			"already_configured": "This AI device agent is already configured."
+		}
+	}
+}
