@@ -144502,5 +144502,29 @@
     "seen": 1787254172.2286067,
     "ast_hash": "a35d403a75739ea15d2f896445bf7662",
     "semantic_hash": "a35d403a75739ea15d2f896445bf7662"
+  },
+  "analyze_architecture.py": {
+    "mtime": 1787254393.0078993,
+    "seen": 1787260011.8304958,
+    "ast_hash": "b4b79effd5b748a2895c4300a52f84cd",
+    "semantic_hash": "b4b79effd5b748a2895c4300a52f84cd"
+  },
+  "analyze_cache.py": {
+    "mtime": 1787253939.5432596,
+    "seen": 1787260011.830518,
+    "ast_hash": "1eea99e2ca2af3ece42886c324d9a7fe",
+    "semantic_hash": "1eea99e2ca2af3ece42886c324d9a7fe"
+  },
+  "analyze_graph.py": {
+    "mtime": 1787254353.5577707,
+    "seen": 1787260011.8305225,
+    "ast_hash": "8d6c6e936dcc8093ccac15f4ed5f6913",
+    "semantic_hash": "8d6c6e936dcc8093ccac15f4ed5f6913"
+  },
+  "final_analysis.py": {
+    "mtime": 1787254444.442684,
+    "seen": 1787260011.8305254,
+    "ast_hash": "0a7f06aa8fdb4e53ebf8d40c5dff7447",
+    "semantic_hash": "0a7f06aa8fdb4e53ebf8d40c5dff7447"
   }
 }
