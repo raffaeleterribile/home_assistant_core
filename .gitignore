@@ -151,4 +151,5 @@ tests/e2e/playwright-report/
 tests/e2e/test-results/
 
 # Application
-graphify-out/2026-08-20
+**/graph.json
+!graphify-out/graph.json
