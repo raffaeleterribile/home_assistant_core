@@ -2,7 +2,7 @@
 description: "Use when developing or debugging Home Assistant Core integrations, writing integration tests, running targeted pytest, checking quality scale patterns, or preparing safe HA code changes. Also use when mapping components and their relationships from the project knowledge graph. Keywords: Home Assistant integration, config flow, entity platform, coordinator, hassfest, pytest, ruff, prek, graphify, knowledge graph, component relationships."
 name: "Home Assistant Backend Dev"
 tools: [read, search, edit, execute]
-model: "GPT-5.4 (copilot)"
+model: "Auto (copilot)"
 argument-hint: "Describe the integration, file paths, error, and expected behavior or test outcome."
 user-invocable: true
 ---
