@@ -1,6 +1,6 @@
 # Implementation Plan: AI Device Agent
 
-**Branch**: `[001-feature-prehook]` | **Date**: 2026-08-21 | **Spec**: [spec.md](./spec.md)
+**Branch**: `[001-ai-device-agent]` | **Date**: 2026-08-21 | **Spec**: [spec.md](./spec.md)
 **Input**: Feature specification from `/specs/001-ai-device-agent/spec.md`
 
 **Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/plan-template.md` for the execution workflow.

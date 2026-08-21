@@ -98,8 +98,8 @@ Represents a normalized user request before execution.
 - `conversation_context_id`: conversation/session identifier
 
 ### Relationships
-- One command request can produce zero or one resolved target in the first
-  release.
+- One command request can produce zero or one resolved target or resolved
+  target set in the first release.
 
 ### Validation Rules
 - Must preserve the original text for auditability.
@@ -116,6 +116,11 @@ Home Assistant inventory.
   unavailable, backend_unavailable
 - `entity_id`: resolved entity when available
 - `device_id`: resolved device when available
+- `entity_ids`: resolved entity set when multiple supported targets are selected
+- `excluded_entity_ids`: unsupported or excluded entities from a mixed target set
+- `excluded_unavailable_entity_ids`: unavailable supported entities excluded from execution
+- `candidate_entity_ids`: candidate targets presented to the user during ambiguity resolution
+- `candidate_labels`: ordered user-visible labels paired with candidate targets
 - `reason`: explanation used for user feedback
 - `needs_confirmation`: whether explicit confirmation is required
 
@@ -124,8 +129,15 @@ Home Assistant inventory.
 - Feeds one command execution attempt when status is `resolved`.
 
 ### Validation Rules
-- Exactly one actionable target may proceed to execution in the first release.
+- One actionable target or one fully supported target set may proceed to
+  execution in the first release.
 - Ambiguous or unsupported resolutions must never trigger execution.
+- Mixed supported/unsupported target sets may execute only the supported
+  entities, and the excluded entities must be reported explicitly.
+- Mixed available/unavailable target sets may execute only the available
+  entities, and the unavailable excluded entities must be reported explicitly.
+- Ambiguous resolutions with multiple supported matches must preserve the
+  candidate set shown to the user.
 
 ## CommandExecution
 
@@ -136,18 +148,27 @@ Represents an attempted or completed device action.
 - `execution_id`: unique identifier
 - `request_id`: originating request
 - `entity_id`: executed entity
+- `entity_ids`: executed target set for multi-target commands
+- `excluded_entity_ids`: excluded entities reported back to the user
+- `excluded_unavailable_entity_ids`: unavailable entities reported back to the user
 - `service_domain`: Home Assistant service domain
 - `service_name`: Home Assistant service name
 - `status`: pending_confirmation, executed, rejected, failed, unavailable
 - `result_message`: user-facing outcome
 
 ### Relationships
-- One execution belongs to one request and one resolved target.
+- One execution belongs to one request and one resolved target or resolved
+  target set.
 
 ### Validation Rules
 - Must carry the caller context into Home Assistant service execution.
 - Must not transition from `unavailable` or `rejected` to `executed` in the
   first release.
+- Multi-target execution must preserve the explicit resolved entity set.
+- Excluded entities must be preserved in the outcome so the user can see which
+  targets were skipped.
+- Excluded unavailable entities must be preserved in the outcome so the user can
+  see which supported targets were skipped because they were unavailable.
 
 ## ConversationSession
 
@@ -160,6 +181,8 @@ Tracks the interaction context for clarification, confirmation, and results.
 - `last_request_id`: most recent request
 - `pending_confirmation_execution_id`: optional execution awaiting confirmation
 - `pending_clarification_request_id`: optional request awaiting clarification
+- `candidate_entity_ids`: optional candidate set awaiting user selection
+- `candidate_labels`: optional ordered labels awaiting user selection by index or name
 
 ### Relationships
 - One session can include many requests over time.
@@ -167,6 +190,10 @@ Tracks the interaction context for clarification, confirmation, and results.
 ### Validation Rules
 - Only one pending confirmation should exist at a time for the first release.
 - Clarification and confirmation state must be cleared once resolved.
+- When clarification is pending, the candidate set must be preserved until the
+  user selects or abandons the request.
+- Candidate ordering and labels must remain stable long enough for the user to
+  answer by index or name.
 
 ## State Transitions
 
