@@ -152,4 +152,4 @@ tests/e2e/test-results/
 
 # Application
 **/graph.json
-!graphify-out/graph.json
+# !graphify-out/graph.json
