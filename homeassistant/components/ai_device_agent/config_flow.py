@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 
-from .const import CONF_NAME, DOMAIN
+from .const import DEFAULT_TITLE, DOMAIN
 
 
 class AiDeviceAgentConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -21,14 +19,12 @@ class AiDeviceAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial step."""
-        if user_input is not None:
-            self._async_abort_entries_match({CONF_NAME: user_input[CONF_NAME]})
-            return self.async_create_entry(
-                title=user_input[CONF_NAME],
-                data=user_input,
-            )
+        if self._async_current_entries():
+            return self.async_abort(reason="already_configured")
 
-        return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_NAME): str}),
-        )
+        if user_input is not None:
+            await self.async_set_unique_id(DOMAIN)
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(title=DEFAULT_TITLE, data={})
+
+        return self.async_show_form(step_id="user")

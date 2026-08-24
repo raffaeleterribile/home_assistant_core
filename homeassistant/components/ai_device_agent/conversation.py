@@ -2,16 +2,36 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Literal, override
+from uuid import uuid4
 
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import MATCH_ALL
+from homeassistant.const import ATTR_ENTITY_ID, MATCH_ALL
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import intent
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import DOMAIN, SUPPORTED_DOMAINS
+from . import get_runtime
+from .const import (
+    BACKEND_UNAVAILABLE_MESSAGE,
+    DOMAIN,
+    SUPPORTED_DOMAINS,
+    UNSUPPORTED_DOMAIN_KEYWORDS,
+)
+from .coordinator import BackendUnavailableError
+from .intent_resolver import resolve_targets
+from .models import (
+    CommandExecution,
+    CommandRequest,
+    ConversationSession,
+    ResolutionStatus,
+)
+from .policy import requires_admin, requires_confirmation
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -27,7 +47,7 @@ class AiDeviceAgentConversationEntity(
     conversation.ConversationEntity,
     conversation.AbstractConversationAgent,
 ):
-    """A simple light and switch conversation agent."""
+    """Conversation agent for light/switch text commands."""
 
     _attr_has_entity_name = True
     _attr_name = "AI Device Agent"
@@ -60,91 +80,317 @@ class AiDeviceAgentConversationEntity(
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
     ) -> conversation.ConversationResult:
-        """Handle a simple text command."""
-        text = user_input.text.strip().lower()
+        """Handle incoming text command."""
+        runtime = get_runtime(self.hass, self.entry.entry_id)
+        text = user_input.text.strip()
+        text_l = text.lower()
+
         if not text:
-            response = conversation.IntentResponse(language=user_input.language)
-            response.async_set_speech("Please say what you want me to do.")
-            return conversation.ConversationResult(response=response)
+            return _speech(user_input.language, "Please say what you want me to do.")
 
-        if any(keyword in text for keyword in ("which devices", "devices are configured", "list")):
-            entities = _collect_supported_entities(self.hass)
-            if not entities:
-                response = conversation.IntentResponse(language=user_input.language)
-                response.async_set_speech("I do not see any supported lights or switches configured.")
-                return conversation.ConversationResult(response=response)
+        if any(
+            keyword in text_l
+            for keyword in ("which devices", "devices are configured", "list")
+        ):
+            labels = _collect_supported_labels(self.hass)
+            if not labels:
+                return _speech(
+                    user_input.language,
+                    "I do not see any supported lights or switches configured.",
+                )
+            return _speech(user_input.language, f"I can control: {', '.join(labels)}.")
 
-            labels = ", ".join(entity.split(".", 1)[1].replace("_", " ") for entity in entities)
-            response = conversation.IntentResponse(language=user_input.language)
-            response.async_set_speech(f"I can control: {labels}.")
-            return conversation.ConversationResult(response=response)
+        if any(keyword in text_l for keyword in UNSUPPORTED_DOMAIN_KEYWORDS):
+            return _speech(
+                user_input.language,
+                "I can only handle light and switch commands in this release.",
+            )
 
-        target = _extract_target(text)
-        if target is None:
-            response = conversation.IntentResponse(language=user_input.language)
-            response.async_set_speech("I can only handle light and switch commands in this release.")
-            return conversation.ConversationResult(response=response)
+        action = _extract_action(text_l)
+        target_hint, area_name = _extract_target_hint(text_l)
+        session = _session_for_input(runtime.sessions, user_input)
 
-        entity_id = _match_entity(self.hass, target)
-        if entity_id is None:
-            response = conversation.IntentResponse(language=user_input.language)
-            response.async_set_speech(f"I could not find a supported light or switch named '{target}'.")
-            return conversation.ConversationResult(response=response)
+        if (
+            session.candidate_entity_ids
+            and target_hint
+            and action in {"turn_on", "turn_off", "toggle"}
+        ):
+            clarified = _resolve_candidate_selection(
+                target_hint,
+                session.candidate_entity_ids,
+                session.candidate_labels,
+            )
+            if clarified is not None:
+                target_hint = clarified
+                session.candidate_entity_ids.clear()
+                session.candidate_labels.clear()
+                session.pending_clarification_request_id = None
 
-        action = "turn_on" if "turn on" in text or "on" in text else "turn_off"
-        state = self.hass.states.get(entity_id)
+        request = CommandRequest(
+            request_id=str(uuid4()),
+            raw_text=text,
+            user_id=user_input.context.user_id,
+            requested_action=action,
+            target_hint=target_hint,
+            conversation_context_id=session.session_id,
+        )
 
-        if not state:
-            response = conversation.IntentResponse(language=user_input.language)
-            response.async_set_speech(f"The target '{target}' is unavailable right now.")
-            return conversation.ConversationResult(response=response)
+        try:
+            await runtime.coordinator.async_interpret(request)
+        except BackendUnavailableError:
+            _log_outcome(
+                request,
+                action,
+                [],
+                "backend_unavailable",
+                "backend_error",
+                [],
+                [],
+            )
+            return _speech(user_input.language, BACKEND_UNAVAILABLE_MESSAGE)
 
-        if user_input.context.user_id is not None:
+        resolved = resolve_targets(self.hass, target_hint, area_name=area_name)
+
+        if resolved.resolution_status == ResolutionStatus.AMBIGUOUS:
+            session.pending_clarification_request_id = request.request_id
+            session.candidate_entity_ids = resolved.candidate_entity_ids
+            session.candidate_labels = resolved.candidate_labels
+            choices = "; ".join(
+                f"{index + 1}) {label}"
+                for index, label in enumerate(resolved.candidate_labels)
+            )
+            _log_outcome(
+                request,
+                action,
+                [],
+                "clarification_required",
+                resolved.reason,
+                [],
+                [],
+            )
+            return _speech(
+                user_input.language,
+                f"{resolved.reason} Options: {choices}. Reply with number or name.",
+            )
+
+        if resolved.resolution_status == ResolutionStatus.UNSUPPORTED:
+            _log_outcome(
+                request,
+                action,
+                [],
+                "unsupported",
+                resolved.reason,
+                resolved.excluded_entity_ids,
+                [],
+            )
+            return _speech(user_input.language, resolved.reason)
+
+        if resolved.resolution_status == ResolutionStatus.UNAVAILABLE:
+            _log_outcome(
+                request,
+                action,
+                [],
+                "unavailable",
+                resolved.reason,
+                resolved.excluded_entity_ids,
+                resolved.excluded_unavailable_entity_ids,
+            )
+            return _speech(user_input.language, resolved.reason)
+
+        resolved_domains = {
+            entity_id.split(".", 1)[0] for entity_id in resolved.entity_ids
+        }
+        if requires_admin(action) and user_input.context.user_id is not None:
             user = await self.hass.auth.async_get_user(user_input.context.user_id)
             if user is not None and not user.is_admin:
-                err = conversation.IntentResponseErrorCode.UNKNOWN
-                response = conversation.IntentResponse(language=user_input.language)
-                response.async_set_error(err, "Permission denied: only an administrator can control devices.")
-                return conversation.ConversationResult(response=response)
+                _log_outcome(
+                    request,
+                    action,
+                    resolved.entity_ids,
+                    "unauthorized",
+                    "admin_required",
+                    resolved.excluded_entity_ids,
+                    resolved.excluded_unavailable_entity_ids,
+                )
+                return _speech(
+                    user_input.language,
+                    "Permission denied: only administrators can execute that action.",
+                )
 
-        service_data = {"entity_id": entity_id}
-        await self.hass.services.async_call("homeassistant", action, service_data, blocking=True, context=user_input.context)
+        if requires_confirmation(action, resolved_domains):
+            _log_outcome(
+                request,
+                action,
+                resolved.entity_ids,
+                "confirmation_required",
+                "policy_confirmation",
+                resolved.excluded_entity_ids,
+                resolved.excluded_unavailable_entity_ids,
+            )
+            return _speech(
+                user_input.language,
+                "This action requires confirmation and is not available in this release.",
+            )
 
-        response = conversation.IntentResponse(language=user_input.language)
-        response.async_set_speech(f"I turned {target} {action.replace('turn_', '')}.")
-        return conversation.ConversationResult(response=response)
+        if not resolved.entity_ids:
+            return _speech(
+                user_input.language, "No executable supported targets were found."
+            )
+
+        await self.hass.services.async_call(
+            "homeassistant",
+            action,
+            {ATTR_ENTITY_ID: resolved.entity_ids},
+            blocking=True,
+            context=user_input.context,
+        )
+
+        execution = CommandExecution(
+            execution_id=str(uuid4()),
+            request_id=request.request_id,
+            entity_ids=resolved.entity_ids,
+            service_domain="homeassistant",
+            service_name=action,
+            status="executed",
+            result_message=_format_success_message(action, resolved.entity_ids),
+            excluded_entity_ids=resolved.excluded_entity_ids,
+            excluded_unavailable_entity_ids=resolved.excluded_unavailable_entity_ids,
+        )
+        _log_outcome(
+            request,
+            action,
+            execution.entity_ids,
+            execution.status,
+            "",
+            execution.excluded_entity_ids,
+            execution.excluded_unavailable_entity_ids,
+        )
+
+        extra_parts: list[str] = []
+        if execution.excluded_entity_ids:
+            extra_parts.append(
+                "unsupported targets excluded: "
+                + ", ".join(execution.excluded_entity_ids)
+            )
+        if execution.excluded_unavailable_entity_ids:
+            extra_parts.append(
+                "unavailable targets excluded: "
+                + ", ".join(execution.excluded_unavailable_entity_ids)
+            )
+
+        message = execution.result_message
+        if extra_parts:
+            message = f"{message} Also, {'. '.join(extra_parts)}."
+        return _speech(user_input.language, message)
 
 
-def _collect_supported_entities(hass: HomeAssistant) -> list[str]:
-    """Collect configured light and switch entity ids."""
-    entities: list[str] = []
-    for entity_id in hass.states.async_entity_ids():
-        domain = entity_id.split(".", 1)[0]
-        if domain in SUPPORTED_DOMAINS:
-            entities.append(entity_id)
-    return sorted(entities)
+def _speech(language: str | None, message: str) -> conversation.ConversationResult:
+    response = intent.IntentResponse(language=language)
+    response.async_set_speech(message)
+    return conversation.ConversationResult(response=response)
 
 
-def _extract_target(text: str) -> str | None:
-    """Pull the likely entity name from a command."""
-    for pattern in (
-        r"turn (?:on|off)\s+([a-z0-9_\- ]+)",
-        r"(?:on|off)\s+([a-z0-9_\- ]+)",
-        r"([a-z0-9_\- ]+)\s+(?:light|switch)",
-    ):
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1).strip()
+def _session_for_input(
+    sessions: dict[str, ConversationSession],
+    user_input: conversation.ConversationInput,
+) -> ConversationSession:
+    session_id = (
+        user_input.conversation_id or f"user:{user_input.context.user_id or 'anon'}"
+    )
+    session = sessions.get(session_id)
+    if session is None:
+        session = ConversationSession(
+            session_id=session_id, user_id=user_input.context.user_id
+        )
+        sessions[session_id] = session
+    return session
+
+
+def _collect_supported_labels(hass: HomeAssistant) -> list[str]:
+    labels: list[str] = []
+    for entity_id in sorted(hass.states.async_entity_ids()):
+        if entity_id.split(".", 1)[0] not in SUPPORTED_DOMAINS:
+            continue
+        state = hass.states.get(entity_id)
+        if state is None:
+            continue
+        label = state.attributes.get("friendly_name") or entity_id.split(".", 1)[
+            1
+        ].replace("_", " ")
+        labels.append(str(label))
+    return labels
+
+
+def _extract_action(text: str) -> str:
+    if "turn on" in text or text.startswith("on "):
+        return "turn_on"
+    if "turn off" in text or text.startswith("off "):
+        return "turn_off"
+    if "toggle" in text:
+        return "toggle"
+    return "query"
+
+
+def _extract_target_hint(text: str) -> tuple[str, str | None]:
+    area_match = re.search(r"\bin\s+([a-z0-9_\- ]+)$", text)
+    area_name = area_match.group(1).strip() if area_match else None
+
+    cleaned = re.sub(r"^(turn\s+on|turn\s+off|toggle|list|show)\s+", "", text)
+    cleaned = re.sub(r"\b(light|lights|switch|switches)\b", "", cleaned)
+    cleaned = re.sub(r"\bin\s+[a-z0-9_\- ]+$", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+
+    return cleaned, area_name
+
+
+def _resolve_candidate_selection(
+    selection_text: str,
+    candidate_entity_ids: list[str],
+    candidate_labels: list[str],
+) -> str | None:
+    if selection_text.isdigit():
+        index = int(selection_text) - 1
+        if 0 <= index < len(candidate_entity_ids):
+            return candidate_entity_ids[index].split(".", 1)[1].replace("_", " ")
+
+    for entity_id, label in zip(candidate_entity_ids, candidate_labels, strict=False):
+        if selection_text == label or selection_text == entity_id.split(".", 1)[
+            1
+        ].replace("_", " "):
+            return entity_id.split(".", 1)[1].replace("_", " ")
+
     return None
 
 
-def _match_entity(hass: HomeAssistant, target: str) -> str | None:
-    """Match a requested label to a supported entity."""
-    normalized_target = target.replace(" ", "_")
-    for entity_id in _collect_supported_entities(hass):
-        if entity_id.endswith(f".{normalized_target}"):
-            return entity_id
-        friendly = entity_id.split(".", 1)[1].replace("_", " ")
-        if friendly == target:
-            return entity_id
-    return None
+def _format_success_message(action: str, entity_ids: list[str]) -> str:
+    labels = ", ".join(
+        entity_id.split(".", 1)[1].replace("_", " ") for entity_id in entity_ids
+    )
+    if action == "turn_on":
+        verb = "on"
+    elif action == "turn_off":
+        verb = "off"
+    else:
+        verb = action
+    return f"I turned {labels} {verb}."
+
+
+def _log_outcome(
+    request: CommandRequest,
+    action: str,
+    resolved_target: list[str],
+    outcome: str,
+    refusal_reason: str,
+    excluded_entity_ids: list[str],
+    excluded_unavailable_entity_ids: list[str],
+) -> None:
+    _LOGGER.info(
+        "AI device command text=%s action=%s resolved_target=%s outcome=%s refusal_reason=%s excluded=%s excluded_unavailable=%s",
+        request.raw_text,
+        action,
+        resolved_target,
+        outcome,
+        refusal_reason,
+        excluded_entity_ids,
+        excluded_unavailable_entity_ids,
+    )
